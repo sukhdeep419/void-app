@@ -5,7 +5,9 @@ import gsap from 'gsap'
 type Message = { id: string; role: 'user' | 'ai'; content: string; }
 
 function formatMessage(content: string) {
-  return content.split(/(\*\*[^*]+?\*\*)/g).map((part, index) => {
+  // Replace <br> tags with newlines
+  const cleanedContent = content.replace(/<br\s*\/?>/gi, '\n')
+  return cleanedContent.split(/(\*\*[^*]+?\*\*)/g).map((part, index) => {
     if (part.startsWith('**') && part.endsWith('**')) {
       return <strong key={index}>{part.slice(2, -2)}</strong>
     }
@@ -49,12 +51,32 @@ export default function CommandInput() {
     }
   }, [messages, isExpanded])
 
-  const handleKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && inputValue.trim() !== '') {
-      const command = inputValue.trim()
-      setInputValue('')
+  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInputValue(e.target.value)
+    e.target.style.height = 'auto'
+    e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`
+  }
+
+  const handleKeyDown = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      if (inputValue.trim() !== '') {
+        const command = inputValue.trim()
+        setInputValue('')
+        if (e.currentTarget) {
+          e.currentTarget.style.height = 'auto'
+        }
+        
+        if (command.toLowerCase() === '/dev') {
+          // @ts-ignore
+          if (window.electronAPI && window.electronAPI.openDevTools) {
+            // @ts-ignore
+            window.electronAPI.openDevTools()
+          }
+          return
+        }
       
-      const aiId = Date.now().toString()
+        const aiId = Date.now().toString()
       
       // Build the history array for the backend BEFORE we add the empty loading bubble
       const currentMessages = messages
@@ -71,7 +93,7 @@ export default function CommandInput() {
       let timeoutId: number | undefined
       const resetTimeout = () => {
         if (timeoutId !== undefined) window.clearTimeout(timeoutId)
-        timeoutId = window.setTimeout(() => controller.abort(), 25_000)
+        timeoutId = window.setTimeout(() => controller.abort(), 120_000)
       }
 
       try {
@@ -123,6 +145,7 @@ export default function CommandInput() {
       } finally {
         if (timeoutId !== undefined) window.clearTimeout(timeoutId)
       }
+    }
     }
   }
 
@@ -216,13 +239,14 @@ export default function CommandInput() {
           </button>
         </div>
         
-        <input 
-          type="text" 
+        <textarea 
+          rows={1}
           value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
+          onChange={handleInput}
           onKeyDown={handleKeyDown}
           onFocus={() => setIsExpanded(true)}
-          className="flex-1 bg-transparent border-none outline-none text-white font-rajdhani text-xl tracking-wide px-4 placeholder:text-gray-600"
+          className="flex-1 bg-transparent border-none outline-none text-white font-rajdhani text-[16px] tracking-wide px-4 placeholder:text-gray-600 resize-none py-3 max-h-[200px] overflow-y-auto"
+          style={{ minHeight: '52px' }}
           placeholder="What would you like me to do?"
         />
         

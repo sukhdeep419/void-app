@@ -2,6 +2,8 @@ import { useEffect } from 'react'
 import Titlebar from './components/Titlebar'
 import SystemStatus from './components/LeftPanel/SystemStatus'
 import NetworkStatus from './components/RightPanel/NetworkStatus'
+import WeatherPanel from './components/RightPanel/WeatherData'
+import NotificationsPanel from './components/RightPanel/NotificationsData'
 import AICore from './components/Center/AICore'
 import CommandInput from './components/Bottom/CommandInput'
 import { SystemProvider } from './hooks/useSystemStats'
@@ -16,6 +18,18 @@ function App() {
       .fromTo('.panel-left', { x: -50, opacity: 0 }, { x: 0, opacity: 1, duration: 0.8, ease: 'back.out(1.2)' }, '-=0.5')
       .fromTo('.panel-right', { x: 50, opacity: 0 }, { x: 0, opacity: 1, duration: 0.8, ease: 'back.out(1.2)' }, '-=0.8')
       .fromTo('.panel-bottom', { y: 50, opacity: 0 }, { y: 0, opacity: 1, duration: 0.8, ease: 'back.out(1.2)' }, '-=0.6')
+
+    const handleGlobalKey = (e: KeyboardEvent) => {
+      if (e.key === 'F12') {
+        // @ts-ignore
+        if (window.electronAPI && window.electronAPI.openDevTools) {
+          // @ts-ignore
+          window.electronAPI.openDevTools()
+        }
+      }
+    }
+    window.addEventListener('keydown', handleGlobalKey)
+    return () => window.removeEventListener('keydown', handleGlobalKey)
   }, [])
 
   return (
@@ -38,22 +52,17 @@ function App() {
           </div>
 
           {/* Empty center space to let the background shine through */}
-          <div className="flex-1" />
+          <div className="flex-1 flex flex-col justify-end relative z-20">
+            <CommandInput />
+          </div>
 
           <div className="panel-right w-[350px] flex flex-col gap-4">
             <NetworkStatus />
-            <div className="glass-panel flex-1 flex items-center justify-center text-gray-500 font-rajdhani text-lg">
-              WEATHER DATA PLACEHOLDER
-            </div>
-            <div className="glass-panel flex-1 flex items-center justify-center text-gray-500 font-rajdhani text-lg">
-              NOTIFICATIONS PLACEHOLDER
-            </div>
+            <WeatherPanel />
+            <NotificationsPanel />
           </div>
         </div>
 
-        <div className="panel-bottom p-6 pt-0 z-10 w-full max-w-4xl mx-auto">
-          <CommandInput />
-        </div>
       </div>
     </SystemProvider>
   )

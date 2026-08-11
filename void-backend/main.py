@@ -71,7 +71,7 @@ def _load_installed_apps():
     ps_script = "Get-StartApps | ConvertTo-Json -Compress"
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", ps_script],
-        capture_output=True, text=True, timeout=15
+        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
     )
     try:
         data = json.loads(result.stdout)
@@ -311,7 +311,7 @@ def execute_tool(name: str, arguments: dict) -> str:
         if is_blocked_action(command):
             return "Blocked: Void is not allowed to delete, remove, or uninstall anything on this system."
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
             output = result.stdout + result.stderr
             return f"Executed '{command}'. Output:\n{output}" if output.strip() else f"Executed '{command}' successfully with no output."
         except Exception as e:
@@ -327,10 +327,7 @@ async def execute_command(request: CommandRequest):
         (message.content for message in reversed(request.messages) if message.role == "user"),
         "",
     )
-    if is_blocked_action(latest_user_message):
-        def blocked_response():
-            yield "I can't delete, remove, or uninstall anything on your system."
-        return StreamingResponse(blocked_response(), media_type="text/plain")
+
 
     chat_history = []
     for m in request.messages:

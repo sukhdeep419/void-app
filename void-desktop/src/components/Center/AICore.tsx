@@ -1,11 +1,19 @@
-import { useRef, useMemo } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { useRef, useMemo, useEffect } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Sphere, MeshDistortMaterial, Torus } from '@react-three/drei'
 import * as THREE from 'three'
+
+// Global shared state for mouse position and speed
+const mousePosRef = { current: new THREE.Vector2() }
+const speedRef = { current: 0 }
 
 // The pulsing inner core
 function InnerCore() {
   const meshRef = useRef<THREE.Mesh>(null)
+  const matRef = useRef<THREE.MeshStandardMaterial>(null)
+  
+  const baseColor = useMemo(() => new THREE.Color("#00f3ff"), [])
+  const redColor = useMemo(() => new THREE.Color("#ff0033"), [])
   
   useFrame((state) => {
     if (meshRef.current) {
@@ -17,11 +25,17 @@ function InnerCore() {
       meshRef.current.rotation.y = time * 0.8
       meshRef.current.rotation.x = time * 0.4
     }
+    
+    if (matRef.current) {
+      matRef.current.color.lerpColors(baseColor, redColor, speedRef.current)
+      matRef.current.emissive.lerpColors(baseColor, redColor, speedRef.current)
+    }
   })
 
   return (
     <Sphere ref={meshRef} args={[1, 32, 32]}>
       <meshStandardMaterial 
+        ref={matRef}
         color="#00f3ff" 
         emissive="#00f3ff" 
         emissiveIntensity={1.5} 
@@ -37,13 +51,20 @@ function InnerCore() {
 function OrbitalRings() {
   const ringsRef = useRef<THREE.Group>(null)
   
+  const baseColor = useMemo(() => new THREE.Color("#00aaff"), [])
+  const redColor = useMemo(() => new THREE.Color("#ff0033"), [])
+  
   useFrame((state) => {
     if (ringsRef.current) {
       const time = state.clock.getElapsedTime()
-      ringsRef.current.children.forEach((ring, i) => {
+      ringsRef.current.children.forEach((ring: any, i) => {
         // Different rotation speeds and axes per ring
         ring.rotation.x = time * (0.15 + i * 0.1)
         ring.rotation.y = time * (0.2 - i * 0.05)
+        
+        if (ring.material) {
+          ring.material.color.lerpColors(baseColor, redColor, speedRef.current)
+        }
       })
     }
   })
@@ -66,6 +87,10 @@ function DataStreams() {
   
   const dummy = new THREE.Object3D()
   const color = new THREE.Color()
+  
+  const baseCol = useMemo(() => new THREE.Color("#00f3ff"), [])
+  const redCol = useMemo(() => new THREE.Color("#ff0033"), [])
+  const targetCol = useMemo(() => new THREE.Color(), [])
   
   // Store initial positions and speeds
   const particleData = useMemo(() => {
@@ -92,6 +117,9 @@ function DataStreams() {
     if (!mesh.current) return
     const time = state.clock.getElapsedTime()
     
+    // Calculate the target color for this frame based on speed
+    targetCol.lerpColors(baseCol, redCol, speedRef.current)
+    
     for (let i = 0; i < count; i++) {
       const pd = particleData[i]
       
@@ -111,7 +139,7 @@ function DataStreams() {
       
       // Set color intensity based on direction and position
       const intensity = pd.speed > 0 ? (currentDist/7) : (1 - currentDist/7)
-      color.set("#00f3ff").multiplyScalar(intensity + 0.1)
+      color.copy(targetCol).multiplyScalar(intensity + 0.1)
       mesh.current.setColorAt(i, color)
     }
     mesh.current.instanceMatrix.needsUpdate = true
@@ -130,11 +158,23 @@ function DataStreams() {
 
 function HologramShell() {
   const meshRef = useRef<THREE.Mesh>(null)
+  
+  const baseColor = useMemo(() => new THREE.Color("#0066ff"), [])
+  const redColor = useMemo(() => new THREE.Color("#ff0000"), [])
+  
+  const baseEmissive = useMemo(() => new THREE.Color("#0033ff"), [])
+  const redEmissive = useMemo(() => new THREE.Color("#990000"), [])
 
   useFrame((state) => {
     if (meshRef.current) {
       meshRef.current.rotation.y = state.clock.getElapsedTime() * 0.1
       meshRef.current.rotation.z = state.clock.getElapsedTime() * 0.05
+      
+      const mat = meshRef.current.material as any
+      if (mat && mat.color) {
+        mat.color.lerpColors(baseColor, redColor, speedRef.current)
+        mat.emissive.lerpColors(baseEmissive, redEmissive, speedRef.current)
+      }
     }
   })
 
@@ -157,7 +197,54 @@ function HologramShell() {
   )
 }
 
+function SceneController({ children }: { children: React.ReactNode }) {
+  const groupRef = useRef<THREE.Group>(null)
+  const prevMouse = useRef(new THREE.Vector2())
+  const { viewport } = useThree()
+  
+  useFrame((state, delta) => {
+    const currentMouse = mousePosRef.current
+    const dist = prevMouse.current.distanceTo(currentMouse)
+    
+    // Calculate speed based on distance and delta time
+    const rawSpeed = dist / Math.max(delta, 0.001)
+    
+    // Normalize speed (experiment with the divisor to adjust sensitivity)
+    const normalizedSpeed = Math.min(rawSpeed / 5.0, 1.0)
+    
+    // Lerp for smooth transition of the color speed value
+    speedRef.current = THREE.MathUtils.lerp(speedRef.current, normalizedSpeed, 0.1)
+    
+    prevMouse.current.copy(currentMouse)
+    
+    if (groupRef.current) {
+      // Convert normalized pointer coordinates (-1 to +1) to viewport coordinates
+      const targetX = (currentMouse.x * viewport.width) / 2
+      const targetY = (currentMouse.y * viewport.height) / 2
+      
+      // Smoothly move the group towards the target
+      groupRef.current.position.x = THREE.MathUtils.lerp(groupRef.current.position.x, targetX, 0.05)
+      groupRef.current.position.y = THREE.MathUtils.lerp(groupRef.current.position.y, targetY, 0.05)
+      
+      // Add a slight rotation based on cursor position for more 3D effect
+      groupRef.current.rotation.y = THREE.MathUtils.lerp(groupRef.current.rotation.y, currentMouse.x * 0.5, 0.05)
+      groupRef.current.rotation.x = THREE.MathUtils.lerp(groupRef.current.rotation.x, -currentMouse.y * 0.5, 0.05)
+    }
+  })
+
+  return <group ref={groupRef}>{children}</group>
+}
+
 export default function AICore() {
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      mousePosRef.current.x = (e.clientX / window.innerWidth) * 2 - 1
+      mousePosRef.current.y = -(e.clientY / window.innerHeight) * 2 + 1
+    }
+    window.addEventListener('mousemove', handleMouseMove)
+    return () => window.removeEventListener('mousemove', handleMouseMove)
+  }, [])
+
   return (
     <div className="w-full h-full absolute inset-0 flex items-center justify-center pointer-events-none">
       {/* Outer decorative rings (scaled up for full screen effect) */}
@@ -171,10 +258,12 @@ export default function AICore() {
           <pointLight position={[10, 10, 10]} intensity={1.5} color="#00f3ff" />
           <pointLight position={[-10, -10, -10]} intensity={0.5} color="#0066ff" />
           
-          <InnerCore />
-          <OrbitalRings />
-          <DataStreams />
-          <HologramShell />
+          <SceneController>
+            <InnerCore />
+            <OrbitalRings />
+            <DataStreams />
+            <HologramShell />
+          </SceneController>
         </Canvas>
       </div>
       
@@ -183,3 +272,4 @@ export default function AICore() {
     </div>
   )
 }
+

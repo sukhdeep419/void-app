@@ -55,6 +55,10 @@ function createWindow() {
     win?.close()
   })
 
+  ipcMain.on('window-open-devtools', () => {
+    win?.webContents.openDevTools({ mode: 'detach' })
+  })
+
   // Start maxmized by default
   win.maximize()
 
@@ -79,4 +83,25 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  const { session, globalShortcut } = require('electron')
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'geolocation') {
+      callback(true)
+    } else {
+      callback(false)
+    }
+  })
+  
+  globalShortcut.register('F12', () => {
+    if (win) win.webContents.openDevTools({ mode: 'detach' })
+  })
+
+  createWindow()
+})
+
+app.on('will-quit', () => {
+  const { globalShortcut } = require('electron')
+  globalShortcut.unregisterAll()
+})
+
