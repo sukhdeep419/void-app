@@ -1,8 +1,9 @@
-import { Mic } from 'lucide-react'
+import { ImagePlus, Mic, X } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import gsap from 'gsap'
 
-type Message = { id: string; role: 'user' | 'ai'; content: string; }
+type ImageAttachment = { name: string; mime_type: string; data: string; preview: string }
+type Message = { id: string; role: 'user' | 'ai'; content: string; confirmationToken?: string; images?: ImageAttachment[]; }
 
 function formatMessage(content: string) {
   // Replace <br> tags with newlines
@@ -20,6 +21,7 @@ export default function CommandInput() {
   const [inputValue, setInputValue] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [isExpanded, setIsExpanded] = useState(false)
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([])
   
   const [customHeight, setCustomHeight] = useState(384)
   const isDragging = useRef(false)
@@ -29,6 +31,7 @@ export default function CommandInput() {
   const micRef = useRef<HTMLButtonElement>(null)
   const pulseRef = useRef<HTMLDivElement>(null)
   const chatRef = useRef<HTMLDivElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     let ctx = gsap.context(() => {
@@ -51,6 +54,50 @@ export default function CommandInput() {
     }
   }, [messages, isExpanded])
 
+  const approveAction = async (messageId: string, token: string) => {
+    setMessages(prev => prev.map(message => message.id === messageId ? { ...message, content: 'Executing approved action...', confirmationToken: undefined } : message))
+    try {
+      const response = await fetch('http://localhost:8000/api/confirm-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.message || 'The approved action could not be completed.')
+      setMessages(prev => prev.map(message => message.id === messageId ? { ...message, content: data.message } : message))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The approved action could not be completed.'
+      setMessages(prev => prev.map(item => item.id === messageId ? { ...item, content: `Error: ${message}` } : item))
+    }
+  }
+
+  const rejectAction = (messageId: string) => {
+    setMessages(prev => prev.map(message => message.id === messageId ? { ...message, content: 'Action cancelled.', confirmationToken: undefined } : message))
+  }
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? [])
+    const remaining = Math.max(0, 3 - attachments.length)
+    files.slice(0, remaining).forEach(file => {
+      if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) return
+      if (file.size > 8 * 1024 * 1024) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = String(reader.result)
+        const base64 = result.split(',', 2)[1]
+        if (base64) {
+          setAttachments(current => [...current, {
+            name: file.name,
+            mime_type: file.type,
+            data: base64,
+            preview: URL.createObjectURL(file),
+          }])
+        }
+      }
+      reader.readAsDataURL(file)
+    })
+    event.target.value = ''
+  }
+
+  const removeAttachment = (preview: string) => {
+    setAttachments(current => current.filter(attachment => attachment.preview !== preview))
+    URL.revokeObjectURL(preview)
+  }
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInputValue(e.target.value)
     e.target.style.height = 'auto'
@@ -60,8 +107,8 @@ export default function CommandInput() {
   const handleKeyDown = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (inputValue.trim() !== '') {
-        const command = inputValue.trim()
+      if (inputValue.trim() !== '' || attachments.length > 0) {
+        const command = inputValue.trim() || 'Please analyze the attached image.'
         setInputValue('')
         if (e.currentTarget) {
           e.currentTarget.style.height = 'auto'
@@ -82,10 +129,10 @@ export default function CommandInput() {
       const currentMessages = messages
         .filter(m => m.content !== '')
         .map(m => ({ role: m.role, content: m.content }));
-      currentMessages.push({ role: 'user', content: command });
+      currentMessages.push({ role: 'user', content: command, images: attachments.map(({ name, mime_type, data }) => ({ name, mime_type, data })) });
 
       setMessages(prev => [...prev, 
-        { id: aiId + '-user', role: 'user', content: command },
+        { id: aiId + '-user', role: 'user', content: command, images: attachments },
         { id: aiId, role: 'ai', content: '' }
       ])
       
@@ -110,6 +157,7 @@ export default function CommandInput() {
         const reader = res.body?.getReader()
         const decoder = new TextDecoder()
         let receivedContent = false
+        let fullResponse = ''
         
         if (reader) {
           let done = false
@@ -118,6 +166,7 @@ export default function CommandInput() {
             done = doneReading
             if (value) {
               const chunk = decoder.decode(value, { stream: true })
+              fullResponse += chunk
               if (chunk) {
                 receivedContent = true
                 resetTimeout()
@@ -131,6 +180,11 @@ export default function CommandInput() {
 
         if (!receivedContent) {
           throw new Error("The assistant couldn't complete that request. Please try again.")
+        }
+
+        const confirmation = fullResponse.match(/^\[\[VOID_CONFIRM:([a-f0-9]+)\]\]([\s\S]*)$/)
+        if (confirmation) {
+          setMessages(prev => prev.map(message => message.id === aiId ? { ...message, content: confirmation[2].trim(), confirmationToken: confirmation[1] } : message))
         }
       } catch (err) {
         console.error(err)
@@ -218,7 +272,17 @@ export default function CommandInput() {
                 ? 'self-end bg-void-cyan/10 border border-void-cyan/30 text-void-cyan shadow-[0_0_10px_rgba(0,243,255,0.1)]' 
                 : 'self-start bg-void-panel/80 backdrop-blur-md border border-white/10 text-gray-200 shadow-lg'
             }`}>
-              {msg.content ? formatMessage(msg.content) : <span className="animate-pulse">...</span>}
+              {msg.content ? formatMessage(msg.content) : <span className="animate-pulse">...</span>}              {msg.images && msg.images.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {msg.images.map(image => <img key={image.preview} src={image.preview} alt={image.name} className="h-20 max-w-40 object-cover rounded border border-white/15" />)}
+                </div>
+              )}
+              {msg.confirmationToken && (
+                <div className="flex gap-2 mt-3">
+                  <button onClick={() => approveAction(msg.id, msg.confirmationToken!)} className="px-3 py-1 rounded border border-void-cyan/50 text-void-cyan hover:bg-void-cyan/10">Approve</button>
+                  <button onClick={() => rejectAction(msg.id)} className="px-3 py-1 rounded border border-white/20 text-gray-300 hover:bg-white/10">Cancel</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -239,6 +303,20 @@ export default function CommandInput() {
           </button>
         </div>
         
+        <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple className="hidden" onChange={handleImageUpload} />
+        {attachments.length > 0 && (
+          <div className="absolute bottom-full left-4 mb-2 flex gap-2 rounded-xl bg-black/80 border border-white/10 p-2">
+            {attachments.map(image => (
+              <div key={image.preview} className="relative">
+                <img src={image.preview} alt={image.name} className="h-14 w-14 object-cover rounded" />
+                <button onClick={() => removeAttachment(image.preview)} className="absolute -top-2 -right-2 rounded-full bg-black border border-white/20 p-0.5"><X size={12} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button onClick={() => imageInputRef.current?.click()} title="Attach image" className="w-10 h-10 flex items-center justify-center rounded-lg text-gray-400 hover:text-void-cyan hover:bg-white/5 transition-colors">
+          <ImagePlus size={20} />
+        </button>
         <textarea 
           rows={1}
           value={inputValue}
@@ -251,7 +329,7 @@ export default function CommandInput() {
         />
         
         <button 
-          onClick={(e) => { e.stopPropagation(); setMessages([]); setInputValue(''); }}
+          onClick={(e) => { e.stopPropagation(); setMessages([]); setInputValue(''); setAttachments([]); }}
           className="mx-4 px-3 py-1.5 rounded-lg border border-white/10 bg-black/30 text-xs font-mono text-gray-400 uppercase tracking-widest hidden md:block hover:bg-white/10 hover:text-void-cyan hover:border-void-cyan/50 transition-all cursor-pointer"
         >
           New Chat

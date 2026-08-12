@@ -1,68 +1,48 @@
-import { createRequire } from "node:module";
-import { BrowserWindow, app, ipcMain } from "electron";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
+import { createRequire as e } from "node:module";
+import { BrowserWindow as t, app as n, ipcMain as r } from "electron";
+import { fileURLToPath as i } from "node:url";
+import a from "node:path";
 //#region electron/main.ts
-var require = createRequire(import.meta.url);
-var __dirname = path.dirname(fileURLToPath(import.meta.url));
-process.env.APP_ROOT = path.join(__dirname, "..");
-var VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
-var MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
-var RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
-var win;
-function createWindow() {
-	win = new BrowserWindow({
+var o = e(import.meta.url), s = a.dirname(i(import.meta.url));
+process.env.APP_ROOT = a.join(s, "..");
+var c = process.env.VITE_DEV_SERVER_URL, l = a.join(process.env.APP_ROOT, "dist-electron"), u = a.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = c ? a.join(process.env.APP_ROOT, "public") : u;
+var d;
+function f() {
+	d = new t({
 		width: 1280,
 		height: 720,
-		frame: false,
-		transparent: true,
+		frame: !1,
+		transparent: !0,
 		webPreferences: {
-			preload: path.join(__dirname, "preload.js"),
-			contextIsolation: true,
-			nodeIntegration: false
+			preload: a.join(s, "preload.js"),
+			contextIsolation: !0,
+			nodeIntegration: !1
 		}
-	});
-	ipcMain.on("window-minimize", () => {
-		win?.minimize();
-	});
-	ipcMain.on("window-maximize", () => {
-		if (win?.isMaximized()) win?.restore();
-		else win?.maximize();
-	});
-	ipcMain.on("window-close", () => {
-		win?.close();
-	});
-	ipcMain.on("window-open-devtools", () => {
-		win?.webContents.openDevTools({ mode: "detach" });
-	});
-	win.maximize();
-	if (VITE_DEV_SERVER_URL) win.loadURL(VITE_DEV_SERVER_URL);
-	else win.loadFile(path.join(RENDERER_DIST, "index.html"));
+	}), r.on("window-minimize", () => {
+		d?.minimize();
+	}), r.on("window-maximize", () => {
+		d?.isMaximized() ? d?.restore() : d?.maximize();
+	}), r.on("window-close", () => {
+		d?.close();
+	}), r.on("window-open-devtools", () => {
+		d?.webContents.openDevTools({ mode: "detach" });
+	}), d.maximize(), c ? d.loadURL(c) : d.loadFile(a.join(u, "index.html"));
 }
-app.on("window-all-closed", () => {
-	if (process.platform !== "darwin") {
-		app.quit();
-		win = null;
-	}
-});
-app.on("activate", () => {
-	if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
-app.whenReady().then(() => {
-	const { session, globalShortcut } = require("electron");
-	session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-		if (permission === "geolocation") callback(true);
-		else callback(false);
-	});
-	globalShortcut.register("F12", () => {
-		if (win) win.webContents.openDevTools({ mode: "detach" });
-	});
-	createWindow();
-});
-app.on("will-quit", () => {
-	const { globalShortcut } = require("electron");
-	globalShortcut.unregisterAll();
+n.on("window-all-closed", () => {
+	process.platform !== "darwin" && (n.quit(), d = null);
+}), n.on("activate", () => {
+	t.getAllWindows().length === 0 && f();
+}), n.whenReady().then(() => {
+	let { session: e, globalShortcut: t } = o("electron");
+	e.defaultSession.setPermissionRequestHandler((e, t, n) => {
+		n(t === "geolocation");
+	}), t.register("F12", () => {
+		d && d.webContents.openDevTools({ mode: "detach" });
+	}), f();
+}), n.on("will-quit", () => {
+	let { globalShortcut: e } = o("electron");
+	e.unregisterAll();
 });
 //#endregion
-export { MAIN_DIST, RENDERER_DIST, VITE_DEV_SERVER_URL };
+export { l as MAIN_DIST, u as RENDERER_DIST, c as VITE_DEV_SERVER_URL };

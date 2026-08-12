@@ -1,7 +1,7 @@
 import asyncio
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from services.system import get_system_metrics
 
@@ -17,14 +17,24 @@ app.add_middleware(
 
 from pydantic import BaseModel
 
-from typing import List
+from typing import List, Optional
+
+class ImageAttachment(BaseModel):
+    name: str
+    mime_type: str
+    data: str
+
 
 class ChatMessage(BaseModel):
     role: str
     content: str
+    images: List[ImageAttachment] = []
 
 class CommandRequest(BaseModel):
     messages: List[ChatMessage]
+
+class ConfirmActionRequest(BaseModel):
+    token: str
 
 @app.get("/")
 def read_root():
@@ -36,8 +46,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import base64
 import datetime
 import subprocess
+import uuid
 
 # ---------------------------------------------------------------------------
 # Dynamic app resolution
@@ -53,6 +65,29 @@ import re
 import time
 
 _app_cache = {"apps": [], "last_refresh": 0}
+# System-changing actions are planned by the AI, but never executed until the
+# user explicitly approves them in the desktop app.
+PENDING_ACTIONS = {}
+CONFIRMATION_REQUIRED_TOOLS = {
+    "run_terminal_command", "set_volume", "set_system_theme",
+    "set_system_date", "manage_windows", "write_file",
+}
+
+
+def queue_action(name: str, arguments: dict) -> tuple[str, str]:
+    token = uuid.uuid4().hex
+    PENDING_ACTIONS[token] = {
+        "name": name,
+        "arguments": arguments,
+        "created_at": time.time(),
+    }
+    if name == "run_terminal_command":
+        description = f"Run this Windows command:\n{arguments.get('command', '')}"
+    elif name == "write_file":
+        description = f"Write to file: {arguments.get('path', '')}"
+    else:
+        description = f"Perform Windows action: {name.replace('_', ' ')}"
+    return token, description
 
 # Void must never perform file, app, or system removal operations.
 _BLOCKED_ACTION_PATTERN = re.compile(
@@ -60,6 +95,34 @@ _BLOCKED_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+
+def describe_images(images: List[ImageAttachment]) -> str:
+    """Analyze an explicitly attached image with Gemini before planning a reply."""
+    if not images:
+        return ""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "Image analysis is unavailable because GEMINI_API_KEY is not configured."
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        image_parts = []
+        for image in images[:3]:
+            if image.mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                return f"'{image.name}' is not a supported image type. Use PNG, JPG, WebP, or GIF."
+            raw_data = base64.b64decode(image.data, validate=True)
+            if len(raw_data) > 8 * 1024 * 1024:
+                return f"'{image.name}' is larger than the 8 MB attachment limit."
+            image_parts.append({"mime_type": image.mime_type, "data": raw_data})
+        if not image_parts:
+            return "No supported images were attached."
+        response = model.generate_content([
+            "Analyze these user-provided images. Describe relevant visual details, extract visible text accurately, and identify errors or UI elements when present. Do not infer details that are not visible.",
+            *image_parts,
+        ])
+        return response.text or "Gemini could not extract usable details from the image."
+    except Exception as e:
+        return f"Gemini could not analyze the image: {str(e)}"
 
 def is_blocked_action(text: str) -> bool:
     return bool(_BLOCKED_ACTION_PATTERN.search(text or ""))
@@ -207,7 +270,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_terminal_command",
-            "description": "Execute an arbitrary command in the Windows terminal (PowerShell or cmd). Use this to perform system tasks like closing apps, managing files, clearing folders, etc.",
+            "description": "Run a Windows command only for a narrowly scoped system task. Never use this tool to search, list, locate, or enumerate files; use search_windows_files or list_directory for those tasks. Never use it to delete, remove, uninstall, erase, wipe, or format.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -229,6 +292,145 @@ TOOLS = [
                 "type": "object",
                 "properties": {},
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_system_theme",
+            "description": "Change the Windows system theme to Light or Dark mode.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "The theme mode to apply: 'light' or 'dark'."
+                    }
+                },
+                "required": ["mode"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_settings",
+            "description": "Open a specific Windows Settings page (e.g. 'display', 'bluetooth', 'network', 'personalization').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "string",
+                        "description": "The settings page to open. Examples: 'display', 'bluetooth', 'network', 'about'."
+                    }
+                },
+                "required": ["page"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_system_date",
+            "description": "Change the Windows system date and time. This will trigger a UAC prompt.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_string": {
+                        "type": "string",
+                        "description": "The new date and time to set, in a format Windows PowerShell recognizes (e.g., '2025-01-01 14:30:00')."
+                    }
+                },
+                "required": ["date_string"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_windows",
+            "description": "Manage active application windows on the desktop (minimize all or restore).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "The action to perform: 'minimize_all' or 'restore_all'."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Securely read the text contents of a file on the system. Output is capped to prevent overflow.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The absolute path to the file to read."
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create a new text file or overwrite an existing one.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The absolute path to the file to write."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write to the file."
+                    }
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_windows_files",
+            "description": "Search local Windows drives for files by name. This is read-only. Use it when the user asks to find files; never use a terminal command for file search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Part of the filename to find, without a path."},
+                    "extension": {"type": "string", "description": "Optional extension such as pdf, docx, or xlsx."},
+                    "root_path": {"type": "string", "description": "Optional drive or folder to search, e.g. F:\\ or C:\\Users\\Admin\\Documents. Defaults to the user's profile folders."},
+                    "max_results": {"type": "integer", "description": "Maximum matches to return, 1 to 30."}
+                },
+                "required": ["query"]
+            }
+        }
+    },    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "List all files and folders in a specified directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The absolute path to the directory to list."
+                    }
+                },
+                "required": ["path"]
             }
         }
     }
@@ -308,6 +510,8 @@ def execute_tool(name: str, arguments: dict) -> str:
             return f"Failed to set volume: {str(e)}"
     elif name == "run_terminal_command":
         command = arguments.get("command")
+        if re.search(r"\b(dir|where|gci|get-childitem)\b.*(?:/s|-recurse|\\\*)", command or "", re.IGNORECASE):
+            return "File searches must use Void's dedicated file-search action, not a recursive terminal command. Please ask Void to find the files by name, type, and optional drive or folder."
         if is_blocked_action(command):
             return "Blocked: Void is not allowed to delete, remove, or uninstall anything on this system."
         try:
@@ -316,8 +520,152 @@ def execute_tool(name: str, arguments: dict) -> str:
             return f"Executed '{command}'. Output:\n{output}" if output.strip() else f"Executed '{command}' successfully with no output."
         except Exception as e:
             return f"Failed to execute '{command}': {str(e)}"
+    elif name == "set_system_theme":
+        mode = arguments.get("mode", "").lower()
+        if mode not in ["light", "dark"]:
+            return "Failed: theme mode must be 'light' or 'dark'."
+        import winreg
+        try:
+            registry = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
+            key = winreg.OpenKey(registry, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize", 0, winreg.KEY_SET_VALUE)
+            value = 1 if mode == "light" else 0
+            winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, value)
+            winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, value)
+            winreg.CloseKey(key)
+            return f"Successfully set system theme to {mode} mode."
+        except Exception as e:
+            return f"Failed to set system theme: {str(e)}"
+    elif name == "open_settings":
+        page = arguments.get("page", "")
+        if not page:
+            page = "default"
+        try:
+            os.startfile(f"ms-settings:{page}")
+            return f"Successfully opened Windows Settings for '{page}'."
+        except Exception as e:
+            return f"Failed to open settings for '{page}': {str(e)}"
+    elif name == "set_system_date":
+        date_str = arguments.get("date_string")
+        if not date_str:
+            return "Failed: No date string provided."
+        try:
+            ps_command = f"Start-Process powershell -Verb runAs -ArgumentList \"-Command Set-Date -Date '{date_str}'\""
+            subprocess.run(["powershell", "-Command", ps_command], check=True)
+            return "Triggered UAC prompt to set system date. If the user approved, the date was changed."
+        except Exception as e:
+            return f"Failed to set system date: {str(e)}"
+    elif name == "manage_windows":
+        action = arguments.get("action")
+        try:
+            if action == "minimize_all":
+                subprocess.run(["powershell", "-Command", "(New-Object -ComObject Shell.Application).MinimizeAll()"], check=True)
+                return "Successfully minimized all windows."
+            elif action == "restore_all":
+                subprocess.run(["powershell", "-Command", "(New-Object -ComObject Shell.Application).UndoMinimizeALL()"], check=True)
+                return "Successfully restored all windows."
+            else:
+                return f"Unsupported window action: {action}"
+        except Exception as e:
+            return f"Failed to manage windows: {str(e)}"
+    elif name == "read_file":
+        path = arguments.get("path")
+        if not path:
+            return "Failed: No path provided."
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read(8000)
+            if len(content) == 8000:
+                content += "\n\n...[TRUNCATED TO 8000 CHARACTERS]..."
+            return f"File content of {path}:\n{content}"
+        except Exception as e:
+            return f"Failed to read file: {str(e)}"
+    elif name == "write_file":
+        path = arguments.get("path")
+        content = arguments.get("content")
+        if not path or content is None:
+            return "Failed: Path and content are required."
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"Successfully wrote to {path}."
+        except Exception as e:
+            return f"Failed to write to file: {str(e)}"
+    elif name == "search_windows_files":
+        query = str(arguments.get("query", "")).strip()
+        extension = str(arguments.get("extension", "")).strip().lstrip(".")
+        root_path = str(arguments.get("root_path", "")).strip()
+        max_results = max(1, min(30, int(arguments.get("max_results", 20))))
+        if not query and not extension:
+            return "Please provide a filename or file extension to search for."
+        if root_path:
+            expanded_root = os.path.abspath(os.path.expanduser(root_path))
+            if not os.path.isdir(expanded_root):
+                return f"The search location '{root_path}' does not exist or is unavailable."
+            roots = [expanded_root]
+        else:
+            user_profile = os.environ.get("USERPROFILE", "C:\\Users\\Public")
+            roots = [os.path.join(user_profile, folder) for folder in ("Desktop", "Documents", "Downloads", "Pictures")]
+            roots = [folder for folder in roots if os.path.isdir(folder)]
+
+        matches = []
+        query_lower = query.casefold()
+        extension_lower = f".{extension.casefold()}" if extension else ""
+        try:
+            for root in roots:
+                for directory, _, files in os.walk(root, onerror=lambda _: None):
+                    for filename in files:
+                        if query_lower and query_lower not in filename.casefold():
+                            continue
+                        if extension_lower and not filename.casefold().endswith(extension_lower):
+                            continue
+                        full_path = os.path.join(directory, filename)
+                        try:
+                            details = os.stat(full_path)
+                            matches.append((full_path, details.st_size, datetime.datetime.fromtimestamp(details.st_mtime)))
+                        except OSError:
+                            continue
+                        if len(matches) >= max_results:
+                            break
+                    if len(matches) >= max_results:
+                        break
+                if len(matches) >= max_results:
+                    break
+            if not matches:
+                location = root_path or "your common personal folders"
+                return f"No matching files were found in {location}."
+            return "Found files:\n" + "\n".join(
+                f"- {path} ({size} bytes, modified {modified:%Y-%m-%d %H:%M})"
+                for path, size, modified in matches
+            )
+        except Exception as e:
+            return f"Failed to search Windows files: {str(e)}"
+    elif name == "list_directory":
+        path = arguments.get("path")
+        if not path:
+            return "Failed: No path provided."
+        try:
+            items = os.listdir(path)
+            result = []
+            for item in items:
+                full_path = os.path.join(path, item)
+                is_dir = os.path.isdir(full_path)
+                result.append({"name": item, "type": "directory" if is_dir else "file"})
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            return f"Failed to list directory: {str(e)}"
     return "Unknown tool"
 
+
+
+@app.post("/api/confirm-action")
+async def confirm_action(request: ConfirmActionRequest):
+    pending = PENDING_ACTIONS.pop(request.token, None)
+    if not pending:
+        return JSONResponse(status_code=404, content={"message": "This approval request has expired or is no longer available."})
+    if time.time() - pending["created_at"] > 300:
+        return JSONResponse(status_code=410, content={"message": "This approval request expired after five minutes."})
+    result = execute_tool(pending["name"], pending["arguments"])
+    return {"message": result}
 
 @app.post("/api/command")
 async def execute_command(request: CommandRequest):
@@ -335,6 +683,10 @@ async def execute_command(request: CommandRequest):
         role = m.role
         if role == "ai":
             role = "assistant"
+
+        if role == "user" and m.images:
+            image_analysis = describe_images(m.images)
+            content += f"\n\n[Attached image analysis from Gemini:\n{image_analysis}]"
 
         if role == "assistant" and ("[Groq Error:" in content or "function=" in content or "<function=" in content):
             # Hide hallucinated errors from the model's history so it doesn't repeat them
@@ -354,7 +706,9 @@ async def execute_command(request: CommandRequest):
             "When you need to perform an action, you MUST use the native JSON tool-calling API. "
             "CRITICAL: NEVER output tool names or raw tool call strings in your text response. "
             "Do not write things like `<function=...>`, `function=...`, or `(get_time)` in your conversational replies. "
-            "CRITICAL: When you receive data back from a tool (like system info or time), you MUST clearly present that data to the user in your response! Do not just say you successfully retrieved it; actually tell the user what the data is. SAFETY RULE: Never delete, remove, uninstall, erase, wipe, or format anything. Refuse those requests clearly and do not call a tool for them."
+            "CRITICAL: When you receive data back from a tool (like system info or time), you MUST clearly present that data to the user in your response! Do not just say you successfully retrieved it; actually tell the user what the data is. "
+            "SAFETY RULE: Never delete, remove, uninstall, erase, wipe, or format anything. Refuse those requests clearly. "
+            "AGENT RULE: Choose the appropriate tool from the user's intent. ALWAYS use search_windows_files for requests to find, list, or locate files. Set root_path when the user names a drive or folder, and use extension when the user names a file type. Never use run_terminal_command for file searching or listing. Any system-changing tool is automatically shown to the user for approval before it runs. Never delete, remove, uninstall, erase, wipe, or format anything."
         )
     }
     messages_payload = [system_prompt] + chat_history
@@ -392,6 +746,13 @@ async def execute_command(request: CommandRequest):
                 for tool_call in message.tool_calls:
                     func_name = tool_call.function.name
                     arguments = json.loads(tool_call.function.arguments)
+                    if func_name in CONFIRMATION_REQUIRED_TOOLS:
+                        if func_name == "run_terminal_command" and is_blocked_action(arguments.get("command", "")):
+                            yield "I can't delete, remove, or uninstall anything on your system."
+                            return
+                        token, description = queue_action(func_name, arguments)
+                        yield f"[[VOID_CONFIRM:{token}]]{description}"
+                        return
                     result = execute_tool(func_name, arguments)
                     tool_results.append(result)
                     messages_payload.append({
@@ -476,27 +837,40 @@ async def execute_command(request: CommandRequest):
                     args_str = match.group(2).replace('\\"', '"').replace("\\'", "'")
                     arguments = json.loads(args_str)
                 else:
-                    payload_start = error_str.find("{")
-                    if payload_start != -1:
-                        error_payload = ast.literal_eval(error_str[payload_start:])
-                        failed_generation = error_payload.get("error", {}).get("failed_generation", "")
+                    fg_match = re.search(r"'failed_generation'\s*:\s*'(\{.*?\})'\}", error_str, re.DOTALL)
+                    if not fg_match:
+                        fg_match = re.search(r'"failed_generation"\s*:\s*"(\{.*?\})"}', error_str, re.DOTALL)
+                        
+                    if fg_match:
+                        failed_generation = fg_match.group(1)
+                        if fg_match.re.pattern.startswith(r"'failed_generation'"):
+                            failed_generation = failed_generation.replace("\\'", "'")
+                        else:
+                            failed_generation = failed_generation.replace('\\"', '"')
+                        failed_generation = failed_generation.replace('\\\\', '\\')
+                        
                         try:
                             generated_call = json.loads(failed_generation)
                             func_name = generated_call.get("name")
                             arguments = generated_call.get("arguments")
                         except json.JSONDecodeError:
-                            # Some provider errors embed a PowerShell command
-                            # with unescaped inner quotes, making this JSON
-                            # invalid even though the intended tool call is clear.
                             name_match = re.search(r'"name"\s*:\s*"([^"]+)"', failed_generation)
-                            command_match = re.search(
-                                r'"command"\s*:\s*"(.*)"\s*}\s*}$',
-                                failed_generation,
-                                re.DOTALL,
-                            )
-                            if name_match and command_match:
+                            args_match = re.search(r'"arguments"\s*:\s*(\{.*\})', failed_generation, re.DOTALL)
+                            if name_match and args_match:
                                 func_name = name_match.group(1)
-                                arguments = {"command": command_match.group(1).replace('\\"', '"')}
+                                try:
+                                    arguments = json.loads(args_match.group(1))
+                                except Exception:
+                                    pass
+                                    
+                            if func_name and not arguments:
+                                command_match = re.search(r'"command"\s*:\s*"(.*?)"\s*}\s*$', failed_generation, re.DOTALL)
+                                if command_match:
+                                    arguments = {"command": command_match.group(1).replace('\\"', '"')}
+                                else:
+                                    path_match = re.search(r'"path"\s*:\s*"(.*?)"\s*}\s*$', failed_generation, re.DOTALL)
+                                    if path_match:
+                                        arguments = {"path": path_match.group(1).replace('\\"', '"')}
 
                 valid_tool_names = {tool["function"]["name"] for tool in TOOLS}
                 if func_name in valid_tool_names and isinstance(arguments, dict):

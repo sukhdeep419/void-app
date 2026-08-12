@@ -1,10 +1,10 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge as e, ipcRenderer as t } from "electron";
 //#region electron/preload.ts
-contextBridge.exposeInMainWorld("electronAPI", {
-	minimize: () => ipcRenderer.send("window-minimize"),
-	maximize: () => ipcRenderer.send("window-maximize"),
-	close: () => ipcRenderer.send("window-close"),
-	openDevTools: () => ipcRenderer.send("window-open-devtools")
+e.exposeInMainWorld("electronAPI", {
+	minimize: () => t.send("window-minimize"),
+	maximize: () => t.send("window-maximize"),
+	close: () => t.send("window-close"),
+	openDevTools: () => t.send("window-open-devtools")
 });
 //#endregion
 export {};
