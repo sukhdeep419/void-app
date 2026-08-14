@@ -1,12 +1,85 @@
 import { ImagePlus, Mic, X } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import gsap from 'gsap'
+import { apiUrl } from '../../config'
+import { parseStreamBuffer } from '../../utils/streamMarkers'
 
 type ImageAttachment = { name: string; mime_type: string; data: string; preview: string }
-type Message = { id: string; role: 'user' | 'ai'; content: string; confirmationToken?: string; images?: ImageAttachment[]; }
+type Message = {
+  id: string
+  role: 'user' | 'ai'
+  content: string
+  confirmationToken?: string
+  images?: ImageAttachment[]
+}
+
+type StoredImage = { name: string; mime_type: string; data: string }
+type StoredMessage = {
+  id: string
+  role: 'user' | 'ai'
+  content: string
+  confirmationToken?: string
+  images?: StoredImage[]
+}
+
+const CHAT_STORAGE_KEY = 'void-chat-history'
+
+function toStored(messages: Message[]): StoredMessage[] {
+  return messages.map((message) => {
+    const { content, confirmationToken } = parseStreamBuffer(message.content)
+    return {
+      id: message.id,
+      role: message.role,
+      content,
+      confirmationToken: confirmationToken ?? message.confirmationToken,
+      images: message.images?.map(({ name, mime_type, data }) => ({ name, mime_type, data })),
+    }
+  })
+}
+
+function fromStored(stored: StoredMessage[]): Message[] {
+  return stored.map((message) => ({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    confirmationToken: message.confirmationToken,
+    images: message.images?.map((image) => ({
+      ...image,
+      preview: `data:${image.mime_type};base64,${image.data}`,
+    })),
+  }))
+}
+
+function loadStoredMessages(): Message[] {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as StoredMessage[]
+    return Array.isArray(parsed) ? fromStored(parsed) : []
+  } catch {
+    return []
+  }
+}
+
+function renderAiMessage(content: string) {
+  const { content: visibleContent, statusLine } = parseStreamBuffer(content)
+
+  if (visibleContent) {
+    return formatMessage(visibleContent)
+  }
+
+  if (statusLine) {
+    return (
+      <span className="text-void-cyan/90 font-mono text-xs tracking-wide animate-pulse">
+        {statusLine}
+      </span>
+    )
+  }
+
+  return <span className="text-gray-400 animate-pulse">Thinking...</span>
+}
 
 function formatMessage(content: string) {
-  // Replace <br> tags with newlines
   const cleanedContent = content.replace(/<br\s*\/?>/gi, '\n')
   return cleanedContent.split(/(\*\*[^*]+?\*\*)/g).map((part, index) => {
     if (part.startsWith('**') && part.endsWith('**')) {
@@ -19,7 +92,7 @@ function formatMessage(content: string) {
 export default function CommandInput() {
   const [isRecording, setIsRecording] = useState(false)
   const [inputValue, setInputValue] = useState('')
-  const [messages, setMessages] = useState<Message[]>([])
+  const [messages, setMessages] = useState<Message[]>(() => loadStoredMessages())
   const [isExpanded, setIsExpanded] = useState(false)
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
   
@@ -54,16 +127,39 @@ export default function CommandInput() {
     }
   }, [messages, isExpanded])
 
+  useEffect(() => {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toStored(messages)))
+  }, [messages])
+
   const approveAction = async (messageId: string, token: string) => {
-    setMessages(prev => prev.map(message => message.id === messageId ? { ...message, content: 'Executing approved action...', confirmationToken: undefined } : message))
+    setMessages(prev => prev.map(message => message.id === messageId ? {
+      ...message,
+      content: '[[VOID_STATUS:Running approved action — this may take several minutes...]]',
+      confirmationToken: undefined,
+    } : message))
+
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 900_000)
+
     try {
-      const response = await fetch('http://localhost:8000/api/confirm-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+      const response = await fetch(apiUrl('/api/confirm-action'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+        signal: controller.signal,
+      })
       const data = await response.json()
       if (!response.ok) throw new Error(data.message || 'The approved action could not be completed.')
       setMessages(prev => prev.map(message => message.id === messageId ? { ...message, content: data.message } : message))
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'The approved action could not be completed.'
+      const message = error instanceof DOMException && error.name === 'AbortError'
+        ? 'The approved action timed out. Large downloads may need to be split into smaller steps.'
+        : error instanceof Error
+          ? error.message
+          : 'The approved action could not be completed.'
       setMessages(prev => prev.map(item => item.id === messageId ? { ...item, content: `Error: ${message}` } : item))
+    } finally {
+      window.clearTimeout(timeoutId)
     }
   }
 
@@ -115,37 +211,44 @@ export default function CommandInput() {
         }
         
         if (command.toLowerCase() === '/dev') {
-          // @ts-ignore
-          if (window.electronAPI && window.electronAPI.openDevTools) {
-            // @ts-ignore
-            window.electronAPI.openDevTools()
-          }
+          window.electronAPI?.openDevTools()
           return
         }
       
         const aiId = Date.now().toString()
       
       // Build the history array for the backend BEFORE we add the empty loading bubble
-      const currentMessages = messages
+      const currentMessages: Array<{
+        role: 'user' | 'ai'
+        content: string
+        images?: { name: string; mime_type: string; data: string }[]
+      }> = messages
         .filter(m => m.content !== '')
-        .map(m => ({ role: m.role, content: m.content }));
+        .map(m => ({
+          role: m.role,
+          content: m.content,
+          ...(m.images?.length
+            ? { images: m.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }
+            : {}),
+        }))
       currentMessages.push({ role: 'user', content: command, images: attachments.map(({ name, mime_type, data }) => ({ name, mime_type, data })) });
 
       setMessages(prev => [...prev, 
         { id: aiId + '-user', role: 'user', content: command, images: attachments },
         { id: aiId, role: 'ai', content: '' }
       ])
+      setAttachments([])
       
       const controller = new AbortController()
       let timeoutId: number | undefined
       const resetTimeout = () => {
         if (timeoutId !== undefined) window.clearTimeout(timeoutId)
-        timeoutId = window.setTimeout(() => controller.abort(), 120_000)
+        timeoutId = window.setTimeout(() => controller.abort(), 900_000)
       }
 
       try {
         resetTimeout()
-        const res = await fetch('http://localhost:8000/api/command', {
+        const res = await fetch(apiUrl('/api/command'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages: currentMessages }),
@@ -182,10 +285,12 @@ export default function CommandInput() {
           throw new Error("The assistant couldn't complete that request. Please try again.")
         }
 
-        const confirmation = fullResponse.match(/^\[\[VOID_CONFIRM:([a-f0-9]+)\]\]([\s\S]*)$/)
-        if (confirmation) {
-          setMessages(prev => prev.map(message => message.id === aiId ? { ...message, content: confirmation[2].trim(), confirmationToken: confirmation[1] } : message))
-        }
+        const parsed = parseStreamBuffer(fullResponse)
+        setMessages(prev => prev.map(message => message.id === aiId ? {
+          ...message,
+          content: parsed.content || fullResponse.replace(/\[\[VOID_STATUS:[^\]]+\]\]/g, '').trim(),
+          confirmationToken: parsed.confirmationToken,
+        } : message))
       } catch (err) {
         console.error(err)
         const message = err instanceof DOMException && err.name === 'AbortError'
@@ -272,7 +377,7 @@ export default function CommandInput() {
                 ? 'self-end bg-void-cyan/10 border border-void-cyan/30 text-void-cyan shadow-[0_0_10px_rgba(0,243,255,0.1)]' 
                 : 'self-start bg-void-panel/80 backdrop-blur-md border border-white/10 text-gray-200 shadow-lg'
             }`}>
-              {msg.content ? formatMessage(msg.content) : <span className="animate-pulse">...</span>}              {msg.images && msg.images.length > 0 && (
+              {msg.role === 'ai' ? renderAiMessage(msg.content) : formatMessage(msg.content)}              {msg.images && msg.images.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-3">
                   {msg.images.map(image => <img key={image.preview} src={image.preview} alt={image.name} className="h-20 max-w-40 object-cover rounded border border-white/15" />)}
                 </div>
@@ -329,7 +434,7 @@ export default function CommandInput() {
         />
         
         <button 
-          onClick={(e) => { e.stopPropagation(); setMessages([]); setInputValue(''); setAttachments([]); }}
+          onClick={(e) => { e.stopPropagation(); setMessages([]); setInputValue(''); setAttachments([]); localStorage.removeItem(CHAT_STORAGE_KEY); }}
           className="mx-4 px-3 py-1.5 rounded-lg border border-white/10 bg-black/30 text-xs font-mono text-gray-400 uppercase tracking-widest hidden md:block hover:bg-white/10 hover:text-void-cyan hover:border-void-cyan/50 transition-all cursor-pointer"
         >
           New Chat

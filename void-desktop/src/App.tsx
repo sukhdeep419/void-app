@@ -21,11 +21,7 @@ function App() {
 
     const handleGlobalKey = (e: KeyboardEvent) => {
       if (e.key === 'F12') {
-        // @ts-ignore
-        if (window.electronAPI && window.electronAPI.openDevTools) {
-          // @ts-ignore
-          window.electronAPI.openDevTools()
-        }
+        window.electronAPI?.openDevTools()
       }
     }
     window.addEventListener('keydown', handleGlobalKey)

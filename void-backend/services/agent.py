@@ -1,0 +1,339 @@
+import json
+import re
+import threading
+import time
+from typing import Generator, Iterable
+
+from config import GROQ_API_KEY, GROQ_MODEL
+from models import ChatMessage
+from services.dispatch import ToolDispatchResult, dispatch_tool
+from services.images import describe_images
+from services.status import describe_tool_action, status_message
+from services.tool_definitions import TOOLS
+from services.tools import execute_tool
+
+SYSTEM_PROMPT = {
+    "role": "system",
+    "content": (
+        "You are a futuristic, intelligent AI assistant named Void. "
+        "You must ALWAYS reply conversationally to the user and keep a history of the previous chats in mind. "
+        "When you need to perform an action, you MUST use the native JSON tool-calling API. "
+        "CRITICAL: NEVER output tool names or raw tool call strings in your text response. "
+        "Do not write things like `<function=...>`, `function=...`, or `(get_time)` in your conversational replies. "
+        "CRITICAL: When you receive data back from a tool (like system info or time), you MUST clearly present that data to the user in your response! Do not just say you successfully retrieved it; actually tell the user what the data is. "
+        "SAFETY RULE: Never delete, remove, uninstall, erase, wipe, or format anything. Refuse those requests clearly. "
+        "APPROVAL RULE: System-changing tools (terminal commands, file writes, volume, theme, etc.) use exactly ONE approval step via the app's Approve/Cancel buttons. "
+        "NEVER ask conversationally whether to proceed — do not say 'Would you like me to', 'Let me know', 'Shall I', or similar. "
+        "When the user requests an action, call the matching tool immediately; the UI shows the approval prompt. "
+        "If the user already replied yes/go ahead/approve to a prior message, call the tool right away (their consent is already recorded). "
+        "AGENT RULE: Choose the appropriate tool from the user's intent. ALWAYS use search_windows_files for requests to find, list, or locate files. Set root_path when the user names a drive or folder, and use extension when the user names a file type. Never use run_terminal_command for file searching or listing. Never delete, remove, uninstall, erase, wipe, or format anything. "
+        "For large downloads or installs (WordPress, npm, etc.), prefer splitting into separate steps: create folder, download file, then extract — rather than one chained command."
+    ),
+}
+
+HEARTBEAT_TOOLS = {"run_terminal_command", "search_windows_files"}
+
+
+def _chunk_stream(text: str, chunk_size: int = 4) -> Generator[str, None, None]:
+    for index in range(0, len(text), chunk_size):
+        yield text[index : index + chunk_size]
+        time.sleep(0.01)
+
+
+def _yield_dispatch(dispatch: ToolDispatchResult) -> Generator[str, None, bool]:
+    if dispatch.kind == "blocked":
+        yield dispatch.message
+        return True
+    if dispatch.kind == "confirm":
+        yield f"[[VOID_CONFIRM:{dispatch.token}]]{dispatch.description}"
+        return True
+    if dispatch.kind == "unknown":
+        yield dispatch.message
+        return True
+    return False
+
+
+def _run_tool_with_heartbeats(func_name: str, arguments: dict) -> Generator[str, None, str]:
+    label = describe_tool_action(func_name, arguments)
+    yield status_message(label)
+
+    if func_name not in HEARTBEAT_TOOLS:
+        return execute_tool(func_name, arguments)
+
+    result_box: dict[str, str] = {}
+    done = threading.Event()
+
+    def worker():
+        result_box["value"] = execute_tool(func_name, arguments)
+        done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    elapsed = 0
+    while not done.wait(5):
+        elapsed += 5
+        yield status_message(f"{label.rstrip('.')} ({elapsed}s elapsed)")
+
+    return result_box["value"]
+
+
+def _build_chat_history(
+    messages: Iterable[ChatMessage],
+) -> Generator[str, None, list[dict]]:
+    chat_history = []
+    for message in messages:
+        content = message.content
+        role = "assistant" if message.role == "ai" else message.role
+
+        if role == "user" and message.images:
+            yield status_message("Analyzing attached images...")
+            image_analysis = describe_images(message.images)
+            content += f"\n\n[Attached image analysis from Gemini:\n{image_analysis}]"
+
+        if role == "assistant" and (
+            "[Groq Error:" in content or "function=" in content or "<function=" in content
+        ):
+            content = "I processed your request using my internal tools."
+
+        if role in ["user", "assistant"]:
+            chat_history.append({"role": role, "content": content})
+        else:
+            chat_history.append(
+                {"role": "user", "content": f"[{role.upper()} RESULT]: {content}"}
+            )
+    return chat_history
+
+
+def _parse_failed_generation(error_str: str) -> tuple[str | None, dict | None]:
+    func_name = None
+    arguments = None
+
+    match = re.search(r"function=(\w+)[^\w\{]*(\{.*?\})", error_str, re.DOTALL)
+    if match:
+        func_name = match.group(1)
+        args_str = match.group(2).replace('\\"', '"').replace("\\'", "'")
+        arguments = json.loads(args_str)
+        return func_name, arguments
+
+    fg_match = re.search(r"'failed_generation'\s*:\s*'(\{.*?\})'\}", error_str, re.DOTALL)
+    if not fg_match:
+        fg_match = re.search(r'"failed_generation"\s*:\s*"(\{.*?\})"}', error_str, re.DOTALL)
+
+    if not fg_match:
+        return None, None
+
+    failed_generation = fg_match.group(1)
+    if fg_match.re.pattern.startswith(r"'failed_generation'"):
+        failed_generation = failed_generation.replace("\\'", "'")
+    else:
+        failed_generation = failed_generation.replace('\\"', '"')
+    failed_generation = failed_generation.replace("\\\\", "\\")
+
+    try:
+        generated_call = json.loads(failed_generation)
+        return generated_call.get("name"), generated_call.get("arguments")
+    except json.JSONDecodeError:
+        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', failed_generation)
+        args_match = re.search(r'"arguments"\s*:\s*(\{.*\})', failed_generation, re.DOTALL)
+        if name_match and args_match:
+            func_name = name_match.group(1)
+            try:
+                arguments = json.loads(args_match.group(1))
+            except Exception:
+                pass
+
+        if func_name and not arguments:
+            command_match = re.search(
+                r'"command"\s*:\s*"(.*?)"\s*}\s*$', failed_generation, re.DOTALL
+            )
+            if command_match:
+                arguments = {"command": command_match.group(1).replace('\\"', '"')}
+            else:
+                path_match = re.search(
+                    r'"path"\s*:\s*"(.*?)"\s*}\s*$', failed_generation, re.DOTALL
+                )
+                if path_match:
+                    arguments = {"path": path_match.group(1).replace('\\"', '"')}
+
+    return func_name, arguments
+
+
+def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, None]:
+    if not GROQ_API_KEY:
+        yield "The AI backend is not configured. Set GROQ_API_KEY in void-backend/.env and restart the server."
+        return
+
+    from groq import Groq
+
+    yield status_message("Thinking...")
+
+    history_builder = _build_chat_history(messages)
+    chat_history = []
+    try:
+        while True:
+            item = next(history_builder)
+            yield item
+    except StopIteration as stop:
+        chat_history = stop.value
+
+    messages_payload = [SYSTEM_PROMPT] + chat_history
+
+    try:
+        yield status_message("Planning response...")
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages_payload,
+            tools=TOOLS,
+            stream=False,
+        )
+
+        message = response.choices[0].message
+        if message.tool_calls:
+            clean_tool_calls = []
+            for tool_call in message.tool_calls:
+                clean_tool_calls.append(
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        },
+                    }
+                )
+            messages_payload.append(
+                {
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": clean_tool_calls,
+                }
+            )
+
+            tool_results = []
+            for tool_call in message.tool_calls:
+                func_name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+                dispatch = dispatch_tool(func_name, arguments, messages)
+                handled = False
+                for chunk in _yield_dispatch(dispatch):
+                    yield chunk
+                    handled = True
+                if handled:
+                    return
+
+                tool_runner = _run_tool_with_heartbeats(func_name, arguments)
+                result = None
+                try:
+                    while True:
+                        item = next(tool_runner)
+                        yield item
+                except StopIteration as stop:
+                    result = stop.value
+
+                tool_results.append(result)
+                messages_payload.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    }
+                )
+
+            yield status_message("Summarizing results...")
+            final_response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages_payload,
+                stream=False,
+            )
+            final_content = final_response.choices[0].message.content or ""
+            if not final_content.strip():
+                final_content = (
+                    "I completed the request, but couldn't prepare a summary. "
+                    "Here is the result:\n" + "\n\n".join(tool_results)
+                )
+
+            yield from _chunk_stream(final_content)
+            return
+
+        content = message.content or ""
+        known_tools = "|".join(tool["function"]["name"] for tool in TOOLS)
+        match = re.search(fr"({known_tools})[^\w\{{]*(\{{.*?\}})", content, re.DOTALL)
+
+        if match:
+            func_name = match.group(1)
+            try:
+                arguments = json.loads(match.group(2))
+                dispatch = dispatch_tool(func_name, arguments, messages)
+                for chunk in _yield_dispatch(dispatch):
+                    yield chunk
+                    return
+
+                tool_runner = _run_tool_with_heartbeats(func_name, arguments)
+                result = None
+                try:
+                    while True:
+                        item = next(tool_runner)
+                        yield item
+                except StopIteration as stop:
+                    result = stop.value
+
+                messages_payload.append({"role": "assistant", "content": content})
+                messages_payload.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: The tool '{func_name}' was executed with result:\n{result}\n\n"
+                            "Reply to the user naturally in their language. You MUST include and format "
+                            "this result data in your reply! Do not just say you retrieved it.]"
+                        ),
+                    }
+                )
+
+                yield status_message("Preparing reply...")
+                stream_response = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=messages_payload,
+                    tools=TOOLS,
+                    stream=True,
+                )
+                for chunk in stream_response:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+                return
+            except Exception:
+                pass
+
+        yield from _chunk_stream(content)
+
+    except Exception as exc:
+        error_str = str(exc)
+        with open("error.log", "w", encoding="utf-8") as handle:
+            handle.write(error_str)
+
+        try:
+            func_name, arguments = _parse_failed_generation(error_str)
+            if func_name and isinstance(arguments, dict):
+                dispatch = dispatch_tool(func_name, arguments, messages)
+                for chunk in _yield_dispatch(dispatch):
+                    yield chunk
+                    return
+
+                tool_runner = _run_tool_with_heartbeats(func_name, arguments)
+                result = None
+                try:
+                    while True:
+                        item = next(tool_runner)
+                        yield item
+                except StopIteration as stop:
+                    result = stop.value
+
+                fallback_msg = (
+                    f"I executed '{func_name}' directly due to an API format error. "
+                    f"Result:\n{result}"
+                )
+                yield from _chunk_stream(fallback_msg)
+                return
+        except Exception:
+            pass
+
+        yield "\nI'm sorry, I encountered an internal API error while processing your request. Please try again."

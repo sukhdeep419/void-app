@@ -202,7 +202,7 @@ function SceneController({ children }: { children: React.ReactNode }) {
   const prevMouse = useRef(new THREE.Vector2())
   const { viewport } = useThree()
   
-  useFrame((state, delta) => {
+  useFrame((_state, delta) => {
     const currentMouse = mousePosRef.current
     const dist = prevMouse.current.distanceTo(currentMouse)
     

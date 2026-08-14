@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react'
+import { getSystemWebSocketUrl } from '../config'
 
 export interface SystemStats {
   cpu: { usage: number; temp: number };
@@ -28,7 +29,7 @@ export const SystemProvider: React.FC<{children: React.ReactNode}> = ({ children
     let reconnectTimeout: ReturnType<typeof setTimeout>
     
     const connect = () => {
-      ws = new WebSocket('ws://localhost:8000/ws/system')
+      ws = new WebSocket(getSystemWebSocketUrl())
       
       ws.onmessage = (event) => {
         try {

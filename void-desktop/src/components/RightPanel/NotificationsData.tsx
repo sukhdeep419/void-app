@@ -72,7 +72,7 @@ export default function NotificationsPanel() {
         </div>
       ) : notifications.length > 0 ? (
         <div className="flex flex-col gap-3 overflow-y-auto pr-1 custom-scrollbar">
-          {notifications.map((notif, idx) => (
+          {notifications.map((notif) => (
             <div key={notif.id} className="flex gap-2 group cursor-pointer" onClick={() => window.open(notif.url, '_blank')}>
               <div className="w-1 h-full bg-void-cyan/30 mt-1 rounded group-hover:bg-void-cyan transition-colors"></div>
               <div className="flex flex-col flex-1 min-w-0">
