@@ -9,9 +9,11 @@ def status_message(message: str) -> str:
 TOOL_STATUS_LABELS = {
     "get_time": "Checking current time...",
     "open_app": "Opening application...",
+    "search_installed_apps": "Searching installed applications...",
     "set_volume": "Adjusting system volume...",
     "run_terminal_command": "Running terminal command...",
     "get_system_info": "Reading system information...",
+    "get_environment_variables": "Reading user folder paths...",
     "set_system_theme": "Changing system theme...",
     "open_settings": "Opening Windows Settings...",
     "set_system_date": "Updating system date...",
@@ -24,6 +26,9 @@ TOOL_STATUS_LABELS = {
 
 
 def describe_tool_action(func_name: str, arguments: dict) -> str:
+    if func_name == "search_installed_apps":
+        query = arguments.get("query", "")
+        return f"Searching installed apps for '{query}'..."
     if func_name == "open_app":
         app_name = arguments.get("app_name", "application")
         return f"Opening {app_name}..."

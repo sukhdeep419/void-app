@@ -10,6 +10,34 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_installed_apps",
+            "description": (
+                "Search applications installed on the user's Windows PC (Start menu apps). "
+                "Use this when the user asks what apps they have, how many apps of a category "
+                "(image editing, browsers, games, etc.), or wants to find installed software by name. "
+                "Do NOT use search_windows_files for installed applications."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "What to search for, e.g. 'image editing', 'photo', 'paint', 'browser'."
+                        ),
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum matches to return, 1 to 50.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "open_app",
             "description": (
                 "Open any application installed on the user's Windows PC by its common name "
@@ -166,6 +194,17 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_environment_variables",
+            "description": (
+                "Get important Windows user paths (USERPROFILE, DESKTOP_PATH, Documents, etc.). "
+                "Call this before write_file when you need the correct Desktop or user folder path."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Securely read the text contents of a file on the system. "
@@ -187,13 +226,20 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create a new text file or overwrite an existing one.",
+            "description": (
+                "Create a new text file or overwrite an existing one. "
+                "Use DESKTOP_PATH from get_environment_variables, or a path like "
+                "Desktop\\filename.html — never C:\\Users\\Public\\Desktop."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The absolute path to the file to write.",
+                        "description": (
+                            "Absolute path or user-relative path such as Desktop\\myfile.html. "
+                            "Prefer DESKTOP_PATH from get_environment_variables."
+                        ),
                     },
                     "content": {
                         "type": "string",

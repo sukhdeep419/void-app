@@ -4,7 +4,8 @@ import os
 import re
 import subprocess
 
-from services.apps import get_app_index, launch_resolved_app, resolve_app
+from services.apps import get_app_index, launch_resolved_app, resolve_app, search_installed_apps
+from services.paths import get_environment_variables, resolve_file_path
 from services.safety import is_blocked_action
 from services.terminal import get_command_timeout
 
@@ -53,6 +54,13 @@ def execute_tool(name: str, arguments: dict) -> str:
                 "It may not be installed, or may be registered under a different name."
             )
         return launch_resolved_app(match)
+
+    if name == "search_installed_apps":
+        query = str(arguments.get("query", "")).strip()
+        max_results = int(arguments.get("max_results", 30))
+        if not query:
+            return "Please provide a search term for installed applications."
+        return search_installed_apps(query, max_results)
 
     if name == "set_volume":
         level = arguments.get("level")
@@ -191,30 +199,44 @@ def execute_tool(name: str, arguments: dict) -> str:
         except Exception as exc:
             return f"Failed to manage windows: {str(exc)}"
 
+    if name == "get_environment_variables":
+        return get_environment_variables()
+
     if name == "read_file":
         path = arguments.get("path")
         if not path:
             return "Failed: No path provided."
+        resolved = resolve_file_path(path)
         try:
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(resolved, "r", encoding="utf-8") as handle:
                 content = handle.read(8000)
             if len(content) == 8000:
                 content += "\n\n...[TRUNCATED TO 8000 CHARACTERS]..."
-            return f"File content of {path}:\n{content}"
+            return f"File content of {resolved}:\n{content}"
         except Exception as exc:
-            return f"Failed to read file: {str(exc)}"
+            return f"Failed to read file '{resolved}': {str(exc)}"
 
     if name == "write_file":
         path = arguments.get("path")
         content = arguments.get("content")
         if not path or content is None:
             return "Failed: Path and content are required."
+        resolved = resolve_file_path(path)
         try:
-            with open(path, "w", encoding="utf-8") as handle:
+            parent = os.path.dirname(resolved)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(resolved, "w", encoding="utf-8") as handle:
                 handle.write(content)
-            return f"Successfully wrote to {path}."
+            return f"Successfully wrote to {resolved}."
+        except PermissionError:
+            return (
+                f"Permission denied writing to '{resolved}'. "
+                f"Use the user's Desktop path from get_environment_variables "
+                f"(DESKTOP_PATH), not C:\\Users\\Public\\Desktop."
+            )
         except Exception as exc:
-            return f"Failed to write to file: {str(exc)}"
+            return f"Failed to write to file '{resolved}': {str(exc)}"
 
     if name == "search_windows_files":
         query = str(arguments.get("query", "")).strip()
@@ -284,10 +306,11 @@ def execute_tool(name: str, arguments: dict) -> str:
         path = arguments.get("path")
         if not path:
             return "Failed: No path provided."
+        resolved = resolve_file_path(path)
         try:
             items = []
-            for item in os.listdir(path):
-                full_path = os.path.join(path, item)
+            for item in os.listdir(resolved):
+                full_path = os.path.join(resolved, item)
                 items.append(
                     {
                         "name": item,

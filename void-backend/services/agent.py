@@ -8,6 +8,7 @@ from config import GROQ_API_KEY, GROQ_MODEL
 from models import ChatMessage
 from services.context import trim_messages_for_api
 from services.dispatch import ToolDispatchResult, dispatch_tool
+from services.error_recovery import parse_failed_generation
 from services.images import describe_images
 from services.status import describe_tool_action, status_message
 from services.tool_definitions import TOOLS
@@ -27,18 +28,33 @@ SYSTEM_PROMPT = {
         "NEVER ask conversationally whether to proceed — do not say 'Would you like me to', 'Let me know', 'Shall I', or similar. "
         "When the user requests an action, call the matching tool immediately; the UI shows the approval prompt. "
         "If the user already replied yes/go ahead/approve to a prior message, call the tool right away (their consent is already recorded). "
-        "AGENT RULE: Choose the appropriate tool from the user's intent. ALWAYS use search_windows_files for requests to find, list, or locate files. Set root_path when the user names a drive or folder, and use extension when the user names a file type. Never use run_terminal_command for file searching or listing. Never delete, remove, uninstall, erase, wipe, or format anything. "
-        "For large downloads or installs (WordPress, npm, etc.), prefer splitting into separate steps: create folder, download file, then extract — rather than one chained command."
+        "AGENT RULE: Choose the appropriate tool from the user's intent. Use search_installed_apps when the user asks about installed applications, software categories, or how many apps they have. ALWAYS use search_windows_files for requests to find files on disk (not installed apps). Set root_path when the user names a drive or folder, and use extension when the user names a file type. Never use run_terminal_command for file searching or listing. Never delete, remove, uninstall, erase, wipe, or format anything. "
+        "For large downloads or installs (WordPress, npm, etc.), prefer splitting into separate steps: create folder, download file, then extract — rather than one chained command. "
+        "FILE RULE: Before write_file to Desktop, call get_environment_variables and use DESKTOP_PATH. "
+        "Never write to C:\\Users\\Public\\Desktop — that is not the signed-in user's desktop."
     ),
 }
 
-HEARTBEAT_TOOLS = {"run_terminal_command", "search_windows_files"}
+HEARTBEAT_TOOLS = {"run_terminal_command", "search_windows_files", "search_installed_apps"}
 
 
 def _chunk_stream(text: str, chunk_size: int = 4) -> Generator[str, None, None]:
     for index in range(0, len(text), chunk_size):
         yield text[index : index + chunk_size]
         time.sleep(0.01)
+
+
+def _stream_natural_reply(client, messages_payload: list[dict]) -> Generator[str, None, None]:
+    yield status_message("Preparing reply...")
+    stream_response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=trim_messages_for_api(messages_payload),
+        stream=True,
+        tool_choice="none",
+    )
+    for chunk in stream_response:
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 def _yield_dispatch(dispatch: ToolDispatchResult) -> Generator[str, None, bool]:
@@ -104,60 +120,6 @@ def _build_chat_history(
     return chat_history
 
 
-def _parse_failed_generation(error_str: str) -> tuple[str | None, dict | None]:
-    func_name = None
-    arguments = None
-
-    match = re.search(r"function=(\w+)[^\w\{]*(\{.*?\})", error_str, re.DOTALL)
-    if match:
-        func_name = match.group(1)
-        args_str = match.group(2).replace('\\"', '"').replace("\\'", "'")
-        arguments = json.loads(args_str)
-        return func_name, arguments
-
-    fg_match = re.search(r"'failed_generation'\s*:\s*'(\{.*?\})'\}", error_str, re.DOTALL)
-    if not fg_match:
-        fg_match = re.search(r'"failed_generation"\s*:\s*"(\{.*?\})"}', error_str, re.DOTALL)
-
-    if not fg_match:
-        return None, None
-
-    failed_generation = fg_match.group(1)
-    if fg_match.re.pattern.startswith(r"'failed_generation'"):
-        failed_generation = failed_generation.replace("\\'", "'")
-    else:
-        failed_generation = failed_generation.replace('\\"', '"')
-    failed_generation = failed_generation.replace("\\\\", "\\")
-
-    try:
-        generated_call = json.loads(failed_generation)
-        return generated_call.get("name"), generated_call.get("arguments")
-    except json.JSONDecodeError:
-        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', failed_generation)
-        args_match = re.search(r'"arguments"\s*:\s*(\{.*\})', failed_generation, re.DOTALL)
-        if name_match and args_match:
-            func_name = name_match.group(1)
-            try:
-                arguments = json.loads(args_match.group(1))
-            except Exception:
-                pass
-
-        if func_name and not arguments:
-            command_match = re.search(
-                r'"command"\s*:\s*"(.*?)"\s*}\s*$', failed_generation, re.DOTALL
-            )
-            if command_match:
-                arguments = {"command": command_match.group(1).replace('\\"', '"')}
-            else:
-                path_match = re.search(
-                    r'"path"\s*:\s*"(.*?)"\s*}\s*$', failed_generation, re.DOTALL
-                )
-                if path_match:
-                    arguments = {"path": path_match.group(1).replace('\\"', '"')}
-
-    return func_name, arguments
-
-
 def _friendly_api_error(error_str: str) -> str:
     lowered = error_str.lower()
     if (
@@ -173,6 +135,11 @@ def _friendly_api_error(error_str: str) -> str:
         )
     if "rate_limit" in lowered or "rate limit" in lowered:
         return "The AI service is temporarily rate-limited. Please wait a few seconds and try again."
+    if "tool_use_failed" in lowered or "tool choice is none" in lowered:
+        return (
+            "I had trouble finishing that action through the AI API. "
+            "Click **New Chat** and ask again — file creation should work with a fresh conversation."
+        )
     return "I'm sorry, I encountered an internal API error while processing your request. Please try again."
 
 
@@ -263,6 +230,7 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
                 model=GROQ_MODEL,
                 messages=trim_messages_for_api(messages_payload),
                 stream=False,
+                tool_choice="none",
             )
             final_content = final_response.choices[0].message.content or ""
             if not final_content.strip():
@@ -308,16 +276,7 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
                     }
                 )
 
-                yield status_message("Preparing reply...")
-                stream_response = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=trim_messages_for_api(messages_payload),
-                    tools=TOOLS,
-                    stream=True,
-                )
-                for chunk in stream_response:
-                    if chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
+                yield from _stream_natural_reply(client, messages_payload)
                 return
             except Exception:
                 pass
@@ -330,8 +289,15 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
             handle.write(error_str)
 
         try:
-            func_name, arguments = _parse_failed_generation(error_str)
+            func_name, arguments = parse_failed_generation(error_str)
             if func_name and isinstance(arguments, dict):
+                if func_name == "search_windows_files" and arguments.get("extension") == "exe":
+                    func_name = "search_installed_apps"
+                    arguments = {
+                        "query": arguments.get("query", "app"),
+                        "max_results": arguments.get("max_results", 30),
+                    }
+
                 dispatch = dispatch_tool(func_name, arguments, messages)
                 for chunk in _yield_dispatch(dispatch):
                     yield chunk
@@ -346,11 +312,20 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
                 except StopIteration as stop:
                     result = stop.value
 
-                fallback_msg = (
-                    f"I executed '{func_name}' directly due to an API format error. "
-                    f"Result:\n{result}"
-                )
-                yield from _chunk_stream(fallback_msg)
+                recovery_payload = trim_messages_for_api(messages_payload) + [
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System tool result for '{func_name}']:\n{result}\n\n"
+                            "Reply naturally to the user. Present the data clearly. "
+                            "Do not mention API errors or internal tool names."
+                        ),
+                    }
+                ]
+                from groq import Groq
+
+                recovery_client = Groq(api_key=GROQ_API_KEY)
+                yield from _stream_natural_reply(recovery_client, recovery_payload)
                 return
         except Exception:
             pass

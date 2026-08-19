@@ -346,7 +346,7 @@ export default function CommandInput() {
       {messages.length > 0 && (
         <div 
           ref={chatRef}
-          className={`relative flex flex-col gap-3 overflow-y-auto scrollbar-hide transition-colors duration-300 ease-in-out rounded-3xl ${
+          className={`relative flex flex-col gap-1.5 overflow-y-auto scrollbar-hide transition-colors duration-300 ease-in-out rounded-3xl ${
             isExpanded 
               ? 'p-4 bg-black/30 backdrop-blur-2xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.4)]' 
               : 'max-h-32 px-4 pointer-events-none bg-transparent border border-transparent'
@@ -372,7 +372,7 @@ export default function CommandInput() {
             </div>
           )}
           {messages.map(msg => (
-            <div key={msg.id} className={`w-fit max-w-[min(85%,40rem)] min-w-0 select-text whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-sm font-rajdhani tracking-wide ${
+            <div key={msg.id} className={`w-fit max-w-[min(85%,40rem)] min-w-0 select-text whitespace-pre-wrap break-words rounded-xl px-3 py-1.5 text-sm font-rajdhani tracking-wide ${
               msg.role === 'user' 
                 ? 'self-end bg-void-cyan/10 border border-void-cyan/30 text-void-cyan shadow-[0_0_10px_rgba(0,243,255,0.1)]' 
                 : 'self-start bg-void-panel/80 backdrop-blur-md border border-white/10 text-gray-200 shadow-lg'

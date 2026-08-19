@@ -88,6 +88,69 @@ def resolve_app(query: str):
     return None
 
 
+APP_CATEGORY_HINTS = {
+    "image": {"paint", "photo", "image", "gimp", "photoshop", "lightroom", "canva", "pixlr", "affinity", "editor", "drawing", "sketch", "inkscape", "darktable", "snip", "camera"},
+    "editing": {"paint", "photo", "image", "gimp", "photoshop", "lightroom", "canva", "pixlr", "affinity", "editor", "drawing", "sketch", "inkscape", "video", "clip"},
+    "photo": {"paint", "photo", "image", "gimp", "photoshop", "lightroom", "canva", "pixlr", "affinity", "camera", "gallery"},
+    "video": {"video", "clip", "movie", "vlc", "media", "premiere", "davinci", "obs"},
+    "game": {"game", "steam", "xbox", "epic", "battle"},
+    "browser": {"chrome", "firefox", "edge", "brave", "opera", "browser"},
+}
+
+
+def search_installed_apps(query: str, max_results: int = 30) -> str:
+    """Search installed Windows apps from the Start menu index."""
+    apps = get_app_index()
+    if not apps:
+        apps = get_app_index(force_refresh=True)
+
+    if not apps:
+        return "Could not load the list of installed applications."
+
+    query_norm = _normalise_app_name(query)
+    query_words = {word for word in query_norm.split() if word}
+    max_results = max(1, min(50, int(max_results)))
+
+    category_hints: set[str] = set()
+    for word in query_words:
+        category_hints.update(APP_CATEGORY_HINTS.get(word, set()))
+
+    matches: list[dict] = []
+    seen: set[str] = set()
+
+    for app in apps:
+        name_norm = _normalise_app_name(app["name"])
+        name_words = set(name_norm.split())
+        matched = False
+
+        if query_words and query_words.issubset(name_words):
+            matched = True
+        elif query_words and query_words.intersection(name_words):
+            matched = True
+        elif query_norm and query_norm in name_norm:
+            matched = True
+        elif category_hints:
+            hint_hits = sum(
+                1 for hint in category_hints if hint in name_norm or hint in name_words
+            )
+            if hint_hits >= 1 and "registry" not in name_norm:
+                matched = True
+
+        if matched and app["name"] not in seen:
+            seen.add(app["name"])
+            matches.append(app)
+
+    matches.sort(key=lambda item: item["name"].casefold())
+    results = matches[:max_results]
+
+    if not results:
+        return f"No installed applications matched '{query}'."
+
+    lines = [f"Found {len(results)} installed application(s) matching '{query}':"]
+    lines.extend(f"- {app['name']}" for app in results)
+    return "\n".join(lines)
+
+
 def launch_resolved_app(app: dict) -> str:
     app_id = app["id"]
     try:
