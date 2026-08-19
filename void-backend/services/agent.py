@@ -6,6 +6,7 @@ from typing import Generator, Iterable
 
 from config import GROQ_API_KEY, GROQ_MODEL
 from models import ChatMessage
+from services.context import trim_messages_for_api
 from services.dispatch import ToolDispatchResult, dispatch_tool
 from services.images import describe_images
 from services.status import describe_tool_action, status_message
@@ -157,6 +158,24 @@ def _parse_failed_generation(error_str: str) -> tuple[str | None, dict | None]:
     return func_name, arguments
 
 
+def _friendly_api_error(error_str: str) -> str:
+    lowered = error_str.lower()
+    if (
+        "413" in error_str
+        or "too large" in lowered
+        or "tokens per minute" in lowered
+        or ("token" in lowered and "limit" in lowered)
+    ):
+        return (
+            "This conversation is too large for the AI to process — usually because an "
+            "earlier reply included a very long log or file dump. Click **New Chat** and "
+            "ask again about just the latest result."
+        )
+    if "rate_limit" in lowered or "rate limit" in lowered:
+        return "The AI service is temporarily rate-limited. Please wait a few seconds and try again."
+    return "I'm sorry, I encountered an internal API error while processing your request. Please try again."
+
+
 def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, None]:
     if not GROQ_API_KEY:
         yield "The AI backend is not configured. Set GROQ_API_KEY in void-backend/.env and restart the server."
@@ -175,7 +194,7 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
     except StopIteration as stop:
         chat_history = stop.value
 
-    messages_payload = [SYSTEM_PROMPT] + chat_history
+    messages_payload = trim_messages_for_api([SYSTEM_PROMPT] + chat_history)
 
     try:
         yield status_message("Planning response...")
@@ -242,7 +261,7 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
             yield status_message("Summarizing results...")
             final_response = client.chat.completions.create(
                 model=GROQ_MODEL,
-                messages=messages_payload,
+                messages=trim_messages_for_api(messages_payload),
                 stream=False,
             )
             final_content = final_response.choices[0].message.content or ""
@@ -292,7 +311,7 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
                 yield status_message("Preparing reply...")
                 stream_response = client.chat.completions.create(
                     model=GROQ_MODEL,
-                    messages=messages_payload,
+                    messages=trim_messages_for_api(messages_payload),
                     tools=TOOLS,
                     stream=True,
                 )
@@ -336,4 +355,4 @@ def generate_groq_stream(messages: list[ChatMessage]) -> Generator[str, None, No
         except Exception:
             pass
 
-        yield "\nI'm sorry, I encountered an internal API error while processing your request. Please try again."
+        yield _friendly_api_error(error_str)

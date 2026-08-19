@@ -372,12 +372,13 @@ export default function CommandInput() {
             </div>
           )}
           {messages.map(msg => (
-            <div key={msg.id} className={`max-w-[85%] select-text whitespace-pre-wrap break-words rounded-xl px-4 py-2 text-sm font-rajdhani tracking-wide ${
+            <div key={msg.id} className={`w-fit max-w-[min(85%,40rem)] min-w-0 select-text whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-sm font-rajdhani tracking-wide ${
               msg.role === 'user' 
                 ? 'self-end bg-void-cyan/10 border border-void-cyan/30 text-void-cyan shadow-[0_0_10px_rgba(0,243,255,0.1)]' 
                 : 'self-start bg-void-panel/80 backdrop-blur-md border border-white/10 text-gray-200 shadow-lg'
             }`}>
-              {msg.role === 'ai' ? renderAiMessage(msg.content) : formatMessage(msg.content)}              {msg.images && msg.images.length > 0 && (
+              {msg.role === 'ai' ? renderAiMessage(msg.content) : formatMessage(msg.content)}
+              {msg.images && msg.images.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-3">
                   {msg.images.map(image => <img key={image.preview} src={image.preview} alt={image.name} className="h-20 max-w-40 object-cover rounded border border-white/15" />)}
                 </div>
